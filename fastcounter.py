@@ -112,6 +112,61 @@ def incr(name, delta=1, update_interval=10):
             logging.warn("counter %s reset failed (will double-count): %d",
                          name, delta_to_persist)
 
+def incr_counts(names, delta=1, update=10):
+
+	lock_prefix = "ctr_lck"
+	delta_prefix = "ctr_val"
+	db_keys = [db.Key.from_path('Counter', name) for name in names]
+	
+	name_key_combo = zip(names,db_keys)
+	name_key_dict = dict(name_key_combo) #create a name key dictionary
+	
+	delta_list = []
+	for key in db_keys:
+		delta_list.append(delta)	
+	
+	key_delta_combo = zip(db_keys,delta_list)
+	key_delta_dict = dict(key_delta_combo) #create a key and delta dictionary
+	
+	v_dict = memcache.offsetmulti(key_delta_dict,delta_prefix) #takes a dictionary/map and a prefix, returns a map of counters and values
+	
+	for name in names:
+	
+	lock_key = "ctr_lck:"+ name
+	if memcache.add(lock_key, None, time=update_interval):
+	        # time to enqueue a new task to persist the counter
+	        # note: cast to int on next line is due to GAE issue 2012
+	        # (http://code.google.com/p/googleappengine/issues/detail?id=2012)
+	        
+		key = name_key_dict[name]
+		v = int(v_dict[key]) #grab the value of counter from v_dict
+		
+	        delta_to_persist = v - BASE_VALUE
+	        if delta_to_persist == 0:
+	            return  # nothing to save
+	
+	        try:
+	            qn = random.randint(0, 4)
+	            qname = 'PersistCounter%d' % qn
+	            taskqueue.add(url='/task/counter_persist_incr',
+	                          queue_name=qname,
+	                          params=dict(name=name,
+	                                      delta=delta_to_persist))
+	        except:
+	            # task queue failed but we already put the delta in memcache;
+	            # just try to enqueue the task again next interval
+	            return
+	
+	        # we added the task --> need to decr memcache so we don't double-count
+        failed = False
+	if memcache.offsetmulti(key_delta_dict,delta_prefix) is None:
+		failed = True
+	if failed:
+		logging.warn(logging.warn("counter %s reset failed (will double-count): %d",
+                         name, delta_to_persist))
+
+
+
 
 class CounterPersistIncr(webapp.RequestHandler):
     """Task handler for incrementing the datastore's counter value."""
